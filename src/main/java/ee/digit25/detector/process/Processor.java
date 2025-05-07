@@ -12,6 +12,7 @@ import org.springframework.stereotype.Service;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -24,9 +25,10 @@ public class Processor {
     private final TransactionRequester requester;
     private final TransactionValidator validator;
     private final TransactionVerifier verifier;
-    private final ExecutorService executorService = Executors.newFixedThreadPool(10);
+    private final ExecutorService executorService = Executors.newFixedThreadPool(50);
+    private final ExecutorService verifyService = Executors.newFixedThreadPool(2);
 
-    @Scheduled(fixedDelay = 100)
+    @Scheduled(fixedDelay = 10)
     public void process() {
         log.info("Starting to process a batch of transactions of size {}", TRANSACTION_BATCH_SIZE);
 
@@ -36,20 +38,18 @@ public class Processor {
             return;
         }
 
-        List<Transaction> legitimateTransactions = new ArrayList<>();
-        List<Transaction> fraudulentTransactions = new ArrayList<>();
+        ConcurrentLinkedDeque<String> legitimateTransactionsIds = new ConcurrentLinkedDeque<>();
+        ConcurrentLinkedDeque<String> fraudulentTransactionIds = new ConcurrentLinkedDeque<>();
+//        List<Transaction> legitimateTransactionIds = new ArrayList<>();
+//        List<Transaction> fraudulentTransactionIds = new ArrayList<>();
 
         // Process validation in parallel
         List<CompletableFuture<Void>> futures = transactions.stream()
             .map(transaction -> CompletableFuture.runAsync(() -> {
                 if (validator.isLegitimate(transaction)) {
-                    synchronized (legitimateTransactions) {
-                        legitimateTransactions.add(transaction);
-                    }
+                    legitimateTransactionsIds.add(transaction.getId());
                 } else {
-                    synchronized (fraudulentTransactions) {
-                        fraudulentTransactions.add(transaction);
-                    }
+                    fraudulentTransactionIds.add(transaction.getId());
                 }
             }, executorService))
             .toList();
@@ -57,15 +57,22 @@ public class Processor {
         // Wait for all validation tasks to complete
         CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
 
+        CompletableFuture verify = CompletableFuture.runAsync(() -> {
+            if (!legitimateTransactionsIds.isEmpty()) {
+                verifier.verify(legitimateTransactionsIds.stream().toList());
+                log.info("Verified {} legitimate transactions", legitimateTransactionsIds.size());
+            }
+        }, verifyService);
+
+        CompletableFuture reject = CompletableFuture.runAsync(() -> {
+            if (!fraudulentTransactionIds.isEmpty()) {
+                verifier.reject(fraudulentTransactionIds.stream().toList());
+                log.info("Rejected {} fraudulent transactions", fraudulentTransactionIds.size());
+            }
+        }, verifyService);
         // Batch verify/reject
-        if (!legitimateTransactions.isEmpty()) {
-            verifier.verify(legitimateTransactions);
-            log.info("Verified {} legitimate transactions", legitimateTransactions.size());
-        }
-        
-        if (!fraudulentTransactions.isEmpty()) {
-            verifier.reject(fraudulentTransactions);
-            log.info("Rejected {} fraudulent transactions", fraudulentTransactions.size());
-        }
+
+        CompletableFuture.allOf(verify, reject).join();
+
     }
 }
