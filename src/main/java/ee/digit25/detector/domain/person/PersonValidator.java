@@ -6,6 +6,8 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
+import java.util.List;
+
 @Slf4j
 @Service
 @RequiredArgsConstructor
@@ -19,5 +21,14 @@ public class PersonValidator {
         Person person = requester.get(personCode);
         
         return !person.getWarrantIssued() && person.getHasContract() && !person.getBlacklisted();
+    }
+
+    public boolean areValid(List<String> personCodes) {
+        log.info("Validating persons {}", personCodes);
+
+        List<Person> persons = requester.get(personCodes);
+        return persons.stream().allMatch(person ->
+                !person.getWarrantIssued() && person.getHasContract() && !person.getBlacklisted()
+        );
     }
 }
